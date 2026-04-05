@@ -1,10 +1,11 @@
 """
-Travel Weather App — Tkinter GUI with threaded weather fetches and JSON geocode cache.
+Travel Weather App: Tkinter UI, threaded forecast requests, JSON-backed geocode cache.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -13,6 +14,8 @@ from tkinter import filedialog, messagebox
 from urllib.parse import urlencode
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 GEOCODES_FILE = "geocodes.json"
 # Disambiguate short city names (e.g. "Sonoma", "San Mateo") to California.
@@ -56,7 +59,7 @@ class MainApp(tk.Tk):
 
         geocodes: dict[str, dict] = {}
         threads: list[threading.Thread] = []
-        start = time.perf_counter()
+        started = time.perf_counter()
 
         for region in REGIONS:
             for city in REGIONS[region]:
@@ -69,8 +72,13 @@ class MainApp(tk.Tk):
         with open(GEOCODES_FILE, "w", encoding="utf-8") as f:
             json.dump(geocodes, f, indent=2)
 
-        elapsed = time.perf_counter() - start
-        print(f"Geocoding (multithreaded) finished in {elapsed:.2f}s — saved to {GEOCODES_FILE}")
+        elapsed = time.perf_counter() - started
+        logger.debug(
+            "Geocoding finished in %.2fs (%d cities), wrote %s",
+            elapsed,
+            len(geocodes),
+            GEOCODES_FILE,
+        )
         return geocodes
 
     def _fetch_geocoding(self, city: str, geocodes: dict) -> None:
@@ -87,14 +95,14 @@ class MainApp(tk.Tk):
             data = r.json()
             results = data.get("results") or []
             if not results:
-                print(f"Geocoding: no results for {city!r}")
+                logger.warning("Geocoding returned no results for %s", city)
                 return
             loc = results[0]
             entry = {"latitude": loc["latitude"], "longitude": loc["longitude"]}
             with self._geocode_lock:
                 geocodes[city] = entry
         except (requests.RequestException, KeyError, ValueError) as e:
-            print(f"Geocoding failed for {city!r}: {e}")
+            logger.warning("Geocoding failed for %s: %s", city, e)
 
     def submit(self) -> None:
         selected = self.listbox.curselection()
@@ -104,8 +112,8 @@ class MainApp(tk.Tk):
 
         self.weather_data = {}
         threads: list[threading.Thread] = []
-        start = time.perf_counter()
         missing: list[str] = []
+        weather_started = time.perf_counter()
 
         for index in selected:
             item = self.listbox.get(index)
@@ -130,9 +138,13 @@ class MainApp(tk.Tk):
         for t in threads:
             t.join()
 
-        elapsed = time.perf_counter() - start
         if threads:
-            print(f"Weather fetch ({len(threads)} cities, multithreaded) in {elapsed:.2f}s")
+            weather_elapsed = time.perf_counter() - weather_started
+            logger.debug(
+                "Weather fetch finished in %.2fs (%d cities)",
+                weather_elapsed,
+                len(threads),
+            )
 
         for city, payload in self.weather_data.items():
             WeatherDisplay(self, city, payload)
@@ -159,7 +171,7 @@ class MainApp(tk.Tk):
                 with self._weather_lock:
                     results[city] = daily
         except (requests.RequestException, KeyError, ValueError) as e:
-            print(f"Weather request failed for {city!r}: {e}")
+            logger.warning("Weather request failed for %s: %s", city, e)
 
     def on_closing(self) -> None:
         if not self.weather_data:
@@ -215,6 +227,11 @@ class WeatherDisplay(tk.Toplevel):
 
 
 if __name__ == "__main__":
+    _debug = os.environ.get("TRAVEL_WEATHER_DEBUG", "").strip().lower() in ("1", "true", "yes")
+    logging.basicConfig(
+        level=logging.DEBUG if _debug else logging.WARNING,
+        format="%(levelname)s: %(message)s",
+    )
     app = MainApp()
     app.protocol("WM_DELETE_WINDOW", app.on_closing)
     app.mainloop()
